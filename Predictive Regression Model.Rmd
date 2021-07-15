@@ -1,0 +1,1118 @@
+---
+title: "Hospital-Inpatient-Discharges -Predictive regression modeling with R"
+author: "Jalpaben Patel"
+date: "February 9, 2021"
+output:
+ html_document: 
+   smart: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Step 1 - Familiarize yourself with the data and the assignment
+
+This assignment will give you a chance to do a little bit of everything - data wrangling,
+EDA, and predictive regression modeling. In this assignment you'll build some predictive regression models
+with R on a dataset containing inpatient discharges from hospitals in New York.
+
+The version of
+this data that we'll be using is from a Kaggle dataset. See
+https://www.kaggle.com/jonasalmeida/2015-deidentified-ny-inpatient-discharge-sparcs. 
+Unfortunately, the column metadata wasn't posted. However, since this is a
+publicly available dataset, we can visit the source at 
+https://health.data.ny.gov/Health/Hospital-Inpatient-Discharges-SPARCS-De-Identified/82xm-y6g8.
+
+If you scroll down on that page you'll find descriptions of the columns (click
+the little Show All link to display the entire list).
+
+Most of the fields are self-explanatory. You'll notice that there are several
+sets of diagnosis and procedure codes. A few definitions are helpful.
+
+### DRG - Diagnosis Related Groups
+
+DRGs are a coding system developed in the 1980s that form the basis of how
+hospitals are reimbursed from Medicare (US Govt) or private insurers. After
+a patient is discharged from the hospital, a program known as a *DRG grouper*
+uses information such as diagnosis and procedure codes (ICD-9-CM) to assign a DRG
+to the patient. A full list of the over 900 DRGs can be found at:
+
+https://www.cms.gov/Research-Statistics-Data-and-Systems/Statistics-Trends-and-Reports/MedicareFeeforSvcPartsAB/downloads/DRGdesc08.pdf
+
+In that list you'll see that MDC (Medical Diagnostic Category) is simply a
+grouping of DRGs.
+
+### CCS - Clinical Classification System
+
+The [CCS](https://www.hcup-us.ahrq.gov/toolssoftware/ccs/ccs.jsp) system was
+developed by the [Agency for Healthcare Research and Quality
+(AHRQ)](https://www.ahrq.gov/) to provide a classification system better suited
+to healthcare research. There are CCS diagnosis codes (the Dx) and CCS procedure (the proc) codes.
+From their website:
+
+> The Clinical Classifications Software (CCS) for ICD-9-CM is a diagnosis and
+> procedure categorization scheme that can be employed in many types of projects
+> analyzing data on diagnoses and procedures. CCS is based on the International
+> Classification of Diseases, 9th Revision, Clinical Modification (ICD-9-CM), a
+> uniform and standardized coding system. The ICD-9-CM's multitude of codes - over
+> 14,000 diagnosis codes and 3,900 procedure codes - are collapsed into a smaller
+> number of clinically meaningful categories that are sometimes more useful for
+> presenting descriptive statistics than are individual ICD-9-CM codes.
+
+It is important to note that the CCS related variables contain both numeric code versions as well as more descriptive text versions. Obviously, these are the same variable, just represented differently and only one or the other (or neither) should be used in any actual regression models.
+
+As we did in HW2, you'll be creating an R Markdown document to
+do the analysis as well as to document the
+steps you did (and answer some questions I'll throw at you).
+
+You'll notice a few "Hacker Extra" tasks thrown in. These are for those of you
+who want to go a little above and beyond and attempt some more challenging
+tasks.
+
+## Step 2 - Create a new R Markdown document
+
+Save this file as a new R Markdown document and name it something that
+includes your last name in the filename. Save it into the
+same folder as this file.
+
+## Step 3 - Create project and load data
+
+Create an R Studio project in the current folder (the one containing this file). You'll notice that there is a folder named **data**.
+Inside of it you'll find the data file for this assignment:
+
+- **ipd_resp.RData**
+
+The full dataset contains over two million records and is available as a CSV
+file from Kaggle. I did a little data filtering and cleaning to create a 
+subset to use for this regression assignment. Specifically, I did the following:
+
+- used dplyr to filter records so that we were just working with `APR MDC Code` == 4. These are patients having respiratory related diagnoses.
+- a bunch of fields were read in as `chr` and I changed them to factors using `as.factor`. 
+- generated a numeric `Age` field based on the `Age_Group` factor field.
+- There were some fields we don't need and they were dropped.
+- I cleaned up the charges and costs fields that got interpreted as `chr` because of the leading dollar sign. Now they are numeric.
+- Modified some field names to make them easier to work with. Spaces in field names are bad.
+
+See the data prep script for all the details. You do **NOT** need to run the
+data prep script. I'm just including it so you can see a typical data prep
+script.
+
+### Load the data
+
+```{r load_data}
+load("./data/ipd_resp.RData")
+
+```
+
+The assignment will begin with me guiding you through some basic data snooping, cleaning, exploratory data analysis (EDA) and data recoding. Then we'll move on to regression modeling.
+
+```{r}
+library(dplyr)   # Group by analysis and other SQLish things.
+library(ggplot2) # Plotting, of course
+library(corrplot) # Correlation plots
+library(tidyr)   # Data reshaping
+library(stringr) # String manipulation
+library(caret)   # Many aspects of predictive modeling
+library(MLmetrics) # We will use its rmse() function for comparing model predictions
+library(forcats)   # Useful for dealing with categorical data - this one will be useful. :)
+library(skimr)       # An automated EDA tool (you saw this in a previous assignment)
+library(coefplot)
+```
+
+Use `str`, `summary`, and `skim` to get a sense of the data. You'll see there's a mix of categorical and numeric data. Our response variable, the thing we will be trying to predict is `Total_Charges`. 
+
+```{r firstlook}
+str(ipd_resp)
+summary(ipd_resp)
+skim(ipd_resp)
+
+is.null(ipd_resp)
+  
+```
+
+
+
+**QUESTION** Is there any missing data, and if so, which columns? 
+
+> ANSWER : No there is no any missing data."is.null(ipd_resp)" return FALSE 
+
+
+
+**QUESTION** Look at the factor variables. What challenges do you think the factor variables might pose when we try to use them in multiple linear regression models?
+
+> ANSWER : Factor variables are variables that classify observations into groups. They have a limited number of different values as levels. So, when we wish to include a Factor variable in a regression model, supplementary steps are required to make the results interpretable.
+
+
+## Step 4 - Partition into training and test sets
+
+We will use the caret package to do the partitioning of our data into training and test dataframes. Just run this chunk to create training and test datasets. This way we'll
+all be working with the same datasets. Notice that the test set is 20% of
+the full dataset.
+
+```{r partition}
+# Simple partition into train (80%) and test (20%) set 
+set.seed(547) # Do NOT change this
+
+trainIndex <- createDataPartition(ipd_resp$Total_Charges, p = .8, 
+                                  list = FALSE, 
+                                  times = 1)
+
+ipd_train <- ipd_resp[as.vector(trainIndex), ]  
+ipd_test <- ipd_resp[-as.vector(trainIndex), ]
+
+rm(ipd_resp) # No sense keeping a copy around. We can always reread it.
+rm(trainIndex) # Don't need this anymore either
+
+```
+
+## Step 5 - EDA on training data
+
+Now we will start with some EDA on the training dataset`ipd_train`. The test data will only get used after building models and want to compare their predictive abilities.
+
+As mentioned above, the dependent variable that we are trying to predict is
+`Total_Charges` - this is the amount that the hospital submits to whomever is
+paying the bill for the hospital stay. This is usually an insurance company,
+the federal Medicare or Medicaid program, an employer who self-insurers or
+the patient. The `Payment_Typology_1` field contains the primary payer to whom
+the charges are submitted. If you look at the relationship between `Total_Costs`
+and `Total_Charges`, you'll start to see why the economics of the
+US healthcare system is hard to understand.
+
+You'll notice that `ipd_train` contains a few numeric fields and many
+factors (categorical data). You are free to use any of these fields in your
+regression models to predict `Total_Charges`.
+
+We will start by using things like ggplot2 and dplyr to explore the training dataset.
+You can use other packages as well. Your goal is to gain a general understanding
+of the variables and perhaps uncover some useful relationships that you can
+use in your regression models.
+
+**NOTE: In the data prep phase I made sure there were no NA values in the data
+frames that we are using for this assignment. So, no need to worry about that.**
+
+Ok, here we go...
+
+### Some dplyr practice
+
+Use dplyr to find the records with the 10 highest `Total_Charges` value for patients in the Finger Lakes region (using the `Health_Service_Area` field). Only display the following columns:
+
+* Facility_Name
+* CCS_Dx_Code
+* CCS_Proc_Code
+* Length_Of_Stay
+* Total_Charges
+* Total_Cost
+
+```{r dplyr1}
+#str(ipd_train)
+#ipd_train
+#colnames(ipd_train)
+
+
+Top_10_Highcharges <- ipd_train %>%
+                      arrange(desc(Total_Charges)) %>% 
+                      filter(Health_Service_Area =="Finger Lakes")
+  
+Top_10_Highcharges %>% 
+  head(10)  %>%
+  select(c("Facility_Name", "CCS_Dx_Code","CCS_Proc_Code" ,Length_of_Stay , "Total_Charges","Total_Costs" ))
+
+
+```
+
+
+
+Now let's use dplyr to do some group by analysis to explore some of the factor variables. I've given you a code skeleton to get you started. I compute the count and the mean `Total_Charges` value. Obviously you can add more summary stats if you wish. Note, you should also sort the results in descending order by the count. Do this for at least five of the factor variables (obviously, don't do both the code and descriptive versions of the CCS fields)
+
+> Summarize your findings. Does it seem like some of these factors might have value for predicting `Total_Charges`? 
+
+> Answer: CCS_Dx_Code and CCS_Proc_Code can be considered for predicting `Total_Charges`.Beacause those two variables do not have a large difference between their median and mean which indicates less outliers in respective variables.
+
+```{r groupby_template}
+
+#colnames(ipd_train)
+#str(ipd_train)
+#ipd_train 
+
+# CCS_Dx_Code, CCS_Proc_Code, APR_DRG_Code, APR_Risk_of_Mortality, Facility_Name and Health_Service_Area 
+
+
+#  Summary 1
+
+ipd_train %>%
+  group_by(CCS_Dx_Code) %>%
+  summarise(
+    no_of_records = n(),
+    mean_charges = mean(Total_Charges),
+    median_ch = median(Total_Charges),
+    max_charges = max(Total_Charges)
+  ) %>%
+   arrange(desc(mean_charges))
+
+#  Summary 2
+
+ipd_train %>%
+  group_by(CCS_Proc_Code) %>%
+  summarise(
+    no_of_records  = n(),
+    mean_charges = mean(Total_Charges),
+    median_ch = median(Total_Charges),
+    max_charges = max(Total_Charges),
+   
+  ) %>%
+   arrange(desc(mean_charges))
+
+#  Summary 3
+
+ipd_train %>%
+  group_by(APR_DRG_Code) %>%
+  summarise(
+    no_of_records  = n(),
+    mean_charges = mean(Total_Charges),
+    median_ch = median(Total_Charges),
+    max_charges = max(Total_Charges)
+  ) %>%
+   arrange(desc(mean_charges))
+
+#  Summary 4
+
+ipd_train %>%
+  group_by(APR_Risk_of_Mortality) %>%
+  summarise(
+    no_of_records  = n(),
+    mean_charges = mean(Total_Charges),
+    max_charges = max(Total_Charges),
+    median_ch = median(Total_Charges)
+  ) %>%
+   arrange(desc(mean_charges))
+
+#  Summary 5
+
+ipd_train %>%
+  group_by(Facility_Name) %>%
+  summarise(
+    count = n(),
+    mean_charges = mean(Total_Charges, na.rm = TRUE),
+    median_ch = median(Total_Charges),
+    max_charges = max(Total_Charges)
+  ) %>%
+   arrange(desc(mean_charges))
+
+#  Summary 6
+
+ipd_train %>%
+  group_by(Health_Service_Area) %>%
+  summarise(
+    count = n(),
+    mean_charges = mean(Total_Charges, na.rm = TRUE),
+    median_ch = median(Total_Charges),
+    max_charges = max(Total_Charges)
+  ) %>%
+   arrange(desc(mean_charges))
+
+```
+
+
+
+### Plots of response variable vs predictors
+
+Let's explore the relationship between the numeric predictors, `Total_Cost` and `Length_of_Stay` and our response variable, `Total_Charges`.
+
+Create a scatter plots of `Total_Cost` vs `Total_Charges` and map the point color to the `Health_Service_Area` variable.
+
+```{r}
+
+ ggplot(data = ipd_train, aes(x=Total_Costs, y = Total_Charges)) + 
+  geom_point(aes(size = Health_Service_Area), alpha = 1/3) +
+  xlab("Total Costs") +
+  ylab("Total Charges")  
+
+```
+
+
+In addition, create another version of this scatter plot but using log transformed versions of the two variables.
+
+```{r scatters}
+
+ ggplot(data = ipd_train, aes(x=log10(Total_Costs), y = log10(Total_Charges))) + 
+  geom_point(aes(size = Health_Service_Area), alpha = 1/3) + 
+  xlab("Total Costs") +
+  ylab("Total Charges")+
+  geom_smooth(se = FALSE)
+
+```
+
+
+
+> Conclusions from the scatters?
+
+> Answer : In both scatter plots of `Total_Cost` vs `Total_Charges`,the data show an uphill pattern and log transformed versions shows those variables has positive linear relationship.
+
+### Correlations
+
+We can only compute correlations between numeric variables. Create a correlation matrix and then use the corrplot library (did this back in the EDA1 notes on summary stats) to create a correlation plot.
+
+
+```{r corr}
+
+
+numdata1 <- subset(ipd_train, select = c(Total_Costs,Total_Charges, Age,Length_of_Stay ))
+
+ndmatrix<- cor(numdata1)
+
+corrplot(ndmatrix, method = "number")
+
+
+```
+
+> Your reaction to the correlation matrix and correlation plot?
+
+> Answer : The above correlation matrix explain there is a positive relationship between [Total_Costs, Total_Charges and Length_of_Stay] variable and  highly correlated. The correlation coefficients value are between 0.8 to 1 which shows strong linear relationship could exist. And variable 'Age' does not have linear correlation between other variables.
+
+
+Let's do some further exploration of the factor variables using boxplots or violin plots. Create boxplots for the `Total_Charges` variable using the following factor variables as the X-axis variables. 
+
+* Type_of_Admission
+* Patient_Disposition
+* Health_Service_Area
+* Payment_Typology_1
+* ED_Ind
+
+Note any challenges faced when trying this for factors with many levels. For example, if the x-axis labels are overlapping, you should flip the boxplot from vertical to horizontal. Of course, feel free to explore more than just these six variables.
+
+```{r boxplots}
+
+g <- ggplot(data = ipd_train)
+
+p1 <- g + geom_boxplot(aes(x = Type_of_Admission, y = Total_Charges), fill = "#FF9999", colour = "black") + labs(title="Total charges for Admission", x="Type of Admission", y="Total Charges") 
+
+
+p2 <- g + geom_boxplot(aes(x = Patient_Disposition, y = Total_Charges), fill = "#FF9999", colour = "black") + labs(title="Patient Disposition Charge", x="Patient Disposition", y="Total Charges") + coord_flip()
+
+
+p3 <- g + geom_boxplot(aes(x = Health_Service_Area, y = Total_Charges), fill = "#FF9999", colour = "black")+ labs(title="Total charges for Health Service Area", x="Health Service Area", y="Total Charges") + coord_flip()
+
+p4 <- g + geom_boxplot(aes(x = Payment_Typology_1, y = Total_Charges), fill = "#FF9999", colour = "black")+ labs(title="Payment Typology Charges", x="Payment Typology", y="Total Charges") + coord_flip()
+
+p5 <- g + geom_boxplot(aes(x = ED_Ind, y = Total_Charges), fill = "#FF9999", colour = "black") + labs(title="Total charges for ED_Ind", x="ED_Ind", y="Total Charges")
+
+
+p1
+p2
+p3
+p4
+p5
+
+```
+
+
+> Conclusions from the boxplots?
+
+> Answer : Each box plot shows the similar patterns of distribution, The dataset of all five varibales are not symmetric and the data are more condensed. There are many values which fall outside a distribution and also all plots do have a lot of outliers
+
+## Step 6 - Factor recoding and feature engineering
+
+### Factor recoding
+
+As alluded to earlier in the assignment, you may run into some issues if you try to use some of the raw factor variables in linear regression. I'll let you discover these issues on your own if you choose to use some of the raw factor variables in the modeling part below.
+
+One common approach to dealing with factors that have a large number of levels and have very small counts for some of the levels, is to "lump" some of the factor levels into an "other" category. The **forcats** ("for categories") package has some very useful lumping functions. Explore these functions (GIYF) and find one that will allow you to create a new variable called `CCS_Dx_Desc_2` based on `CCS_Dx_Desc` in which all levels with n < 500 are lumped into an "other" category (level). Then use dplyr to a group by `CCS_Dx_Desc_2` and count the number records in each level of the new field. Notice that the newly create "Other" category is not the one with the least number of records. 
+
+```{r CCS_recode}
+
+#Recode CCS Dx descriptions with n < 500 lumped
+
+# to see initial level in dataframe
+
+# str(ipd_train)
+# 
+# ipd_train %>%
+#       summarise_each(funs(list(levels(.))))
+
+#  ipd_train$CCS_Dx_Desc
+
+ipd_train$CCS_Dx_Desc_2  <- fct_lump_min(ipd_train$CCS_Dx_Desc, 500, w = NULL, other_level = "Other")
+ipd_train %>%
+  group_by(CCS_Dx_Desc_2) %>%
+  summarise(
+    count_train_CCS_Dx_Desc_2 = n())
+
+
+#str(ipd_train)
+#levels(ipd_train$CCS_Dx_Desc_2)
+
+
+#   ipd_test$CCS_Dx_Desc 
+
+ipd_test$CCS_Dx_Desc_2  <- fct_lump_min(ipd_test$CCS_Dx_Desc, 500, w = NULL, other_level = "Other")
+ipd_test %>%
+  group_by(CCS_Dx_Desc_2) %>%
+  summarise(
+    count_test_CCS_Dx_Desc_2 = n())
+
+#str(ipd_test)
+#levels(ipd_train$CCS_Dx_Desc_2)
+
+
+# Repeat the above for the Dx code versions
+
+
+# ipd_train$CCS_Dx_Code_2 <- ???(ipd_train$CCS_Dx_Code, ???)
+
+ipd_train$CCS_Dx_Code_2  <- fct_lump_min(ipd_train$CCS_Dx_Code, 500, w = NULL, other_level = "Other")
+ipd_train %>%
+  group_by(CCS_Dx_Code_2) %>%
+  summarise(
+    count_train_CCS_Dx_Code_2 = n())
+
+#str(ipd_train)
+
+#levels(ipd_train$CCS_Dx_Code_2)
+
+# ipd_test$CCS_Dx_Code_2 <- ???(ipd_test$CCS_Dx_Code, ???)
+
+ipd_test$CCS_Dx_Code_2  <- fct_lump_min(ipd_test$CCS_Dx_Code, 500, w = NULL, other_level = "Other")
+ipd_test %>%
+  group_by(CCS_Dx_Code_2) %>%
+  summarise(
+    count_test_CCS_Dx_Code_2 = n())
+
+#str(ipd_test)
+#levels(ipd_test$CCS_Dx_Code_2)
+
+# Repeat the above for the APR_DRG_Code (Additional)
+
+
+
+ipd_train$APR_DRG_Code_2  <- fct_lump_min(ipd_train$APR_DRG_Code, 500, w = NULL, other_level = "Other")
+ipd_train %>%
+  group_by(APR_DRG_Code_2) %>%
+  summarise(
+    count_train_APR_DRG_Code_2 = n())
+
+
+
+
+ipd_test$APR_DRG_Code_2  <- fct_lump_min(ipd_test$APR_DRG_Code, 500, w = NULL, other_level = "Other")
+ipd_test %>%
+  group_by(APR_DRG_Code_2) %>%
+  summarise(
+    count_test_APR_DRG_Code_2 = n())
+
+# Repeat the above for the CCS_Proc_Code (Additional)
+
+ipd_train$CCS_Proc_Code_2  <- fct_lump_min(ipd_train$CCS_Proc_Code, 500, w = NULL, other_level = "Other")
+ipd_train %>%
+  group_by(CCS_Proc_Code_2) %>%
+  summarise(
+    count_train_CCS_Proc_Code_2 = n())
+
+
+
+
+ipd_test$CCS_Proc_Code_2  <- fct_lump_min(ipd_test$CCS_Proc_Code, 500, w = NULL, other_level = "Other")
+ipd_test %>%
+  group_by(CCS_Proc_Code_2) %>%
+  summarise(
+    count_test_CCS_Proc_Code_2 = n())
+```
+
+Check out your results.
+
+```{r}
+ipd_train %>%
+  group_by(CCS_Dx_Desc_2) %>%           # For CCS_Dx_Desc_2
+  summarise(
+    n = n(),
+    mean_charges = mean(Total_Charges),
+    median_charges = median(Total_Charges)
+  ) %>%
+  arrange(desc(n))
+
+
+ipd_train %>%                          # For APR_DRG_Code_2
+  group_by(APR_DRG_Code_2) %>%
+  summarise(
+    n = n(),
+    mean_charges = mean(Total_Charges),
+    median_charges = median(Total_Charges)
+  ) %>%
+  arrange(desc(n))
+
+
+```
+
+**HACKER EXTRA** What other lumping function in forcats would you use to create an "Other" field in which it had the lowest number of records across all levels? Try out this function on the `CCS_Dx_Desc` field and see how many records end up in the "Other" category. Does it seem useful with this data?
+
+
+```{r hacker_extra_1}
+
+
+ipd_train$CCS_Dx_Desc_extra  <- fct_lump_lowfreq(ipd_train$CCS_Dx_Desc, other_level = "Other")
+
+
+ipd_train %>%
+  group_by(CCS_Dx_Desc_extra) %>%
+  summarise(
+    count_train_CCS_Dx_Desc_extra = n())
+
+```
+
+> SUMMARIZE YOUR ANSWER HERE : It displays all the level, and "Other" just show 1 field. Nothing would really change. Because the least frequent level has counts 1 and we can not lump further ensuring “Other” is still the smallest level.  So, It would not helpful in "ipd_train" data frame.
+
+
+Later in the regression part of this assignment, feel free to do any factor lumping that you want.
+
+**IMPORTANT NOTE: You must make sure you do the same dataframe changes to both the `ipd_train` and `ipd_test` dataframes. 
+
+
+
+
+### Feature engineering
+
+Creating new variables from existing variables can be a very important part of predictive modeling. We might do this in hopes of creating a variable that has more predictive power than the existing variables. For example, a log transform could be considered a simple type of feature engineering. Another role of feature engineering can be to help deal with factors with many levels. For example, the `CCS_Proc_Code` has many levels and represents the procedure code for the primary procedure (e.g. type of surgical procedure) that the patient had. However, many patients do **NOT** have a procedure and this will show up as a 0 value in the `CCS_Proc_Code`. So, if we believe that we might get sufficient predictive value from a simpler version of the procedure codes, we might create a new binary variable that is equal to:
+
+* 1 if the `CCS_Proc_Code` is not 0
+* 0 if the `CCS_Proc_Code` is equal to 0
+
+Add this new variable to both out training and test dataframes. Let's call it `had_procedure`. You could use dplyr or base R commands (hint: ifelse()). It's up to you. Test your answer by running `table(ipd_train$had_procedure)`. About 40% of cases do NOT have a procedure (i.e. CCS_Proc_Code is equal to 0.)
+
+```{r had_procedure}
+
+#ipd_train$CCS_Proc_Code
+
+ipd_train %>% 
+   mutate( zero = (CCS_Proc_Code == 0) ) %>% 
+    count(zero)
+
+# ipd_train$had_procedure <- ???
+
+  
+ipd_train$had_procedure <- ifelse(ipd_train$CCS_Proc_Code==0, 0, 1)
+
+ipd_train %>% 
+   mutate( one = (had_procedure == 1) ) %>% 
+    count(one)
+
+
+#ipd_test$CCS_Proc_Code
+
+
+ipd_test %>% 
+   mutate( zero = (CCS_Proc_Code == 0) ) %>% 
+    count(zero)
+
+
+# ipd_test$had_procedure <- ???
+
+ipd_test$had_procedure <- ifelse(ipd_test$CCS_Proc_Code==0, 0, 1)
+
+ipd_test %>% 
+   mutate( one = (had_procedure == 1) ) %>% 
+    count(one)
+
+#
+prop.table(table(ipd_train$had_procedure))
+
+prop.table(table(ipd_test$had_procedure))
+
+```
+
+
+Distribution of Age, APR_DRG_Code_2, Ethnicity, CCS_Dx_Desc_2
+
+```{r}
+g <- ggplot(data = ipd_train)
+
+hplot1 <- ggplot(data = ipd_train, aes(x =Age, fill = Total_Charges)) 
+  geom_histogram(aes(y=..density..), binwidth = 4, colour = "black") 
+
+hplot1 + geom_density(alpha=.2, fill="#FFFFCC")
+
+
+g + geom_bar(aes(x = APR_DRG_Code_2))
+
+g + geom_bar(aes(x = Ethnicity) )
+
+g + geom_bar(aes(x = CCS_Dx_Desc_2)) + coord_flip()
+
+```
+
+Feel free to do any additional EDA or feature engineering you wish that you think might help you in building a good predictive regression model for `Total_Charges`. Again, any changes you make to the training dataframe, you **must** make to the test dataframe. Otherwise, when you try to use the `predict()` function with your fitted regression models, it will likely not work (e.g. because you have a variable in train that's not in test).
+ 
+Before we move on, let's save the result of all your work above in Rdata format.
+
+```{r}
+save(ipd_train, ipd_test, file = "data/ipd_hw3_premodeling.Rdata")
+```
+
+## Step 7 - Building and evaluation of predictive models
+
+Now that you know a little more about the data, it's time to start building a
+few predictive models for `Total_Charges`. 
+
+As our error metric for this modeling exercise, we will use RMSE (root mean square error). We will use the built in RMSE function from the MLmetrics package.
+
+### Null model
+
+It's always a good idea to start out with what we call the *null model*. This
+is the simplest possible model and one that other models better be able to 
+beat. For this regression problem, the null model is simply a regression model
+that just has a y-intercept. If you remember some of your statistics, you won't
+be surprised that the best fit value for the y-intercept in this case is 
+the mean of the response variable, `Total_Charges`.
+
+```{r charges_null_model}
+charges_lm0 <- lm(Total_Charges ~ 1, data = ipd_train)
+summary(charges_lm0)
+
+```
+
+In the next chunk, notice how I compute the null prediction as the overall mean in the training data and then compute the RMSE based on that null prediction used against both the training and the test data. You'll see that the mean of `Total_Charges` matches the y-intercept in the null regression model above.
+
+```{r null_model}
+# Compute overall mean Total_Charges
+null_pred <- mean(ipd_train$Total_Charges)
+sprintf("Null model prediction: %.2f",null_pred)
+
+# Compute null model RMSE on train
+null_train_rmse <- RMSE(ipd_train$Total_Charges, null_pred)
+sprintf("Null model train RMSE: %.2f",null_train_rmse)
+
+# Compute null model RMSE on test
+null_test_rmse <- RMSE(ipd_test$Total_Charges, null_pred)
+sprintf("Null model test RMSE: %.2f",null_test_rmse)
+```
+It's definitely not difficult to beat the null model. :)
+
+**QUESTION** The RMSE on test is greater than the RMSE on train. Is this expected or unexpected and why?
+
+> ANSWER : Usually  train RMSE lower than lower than test RMSE. A training set is large, but a test set is small. So a test error is usually somewhat higher than a training error. But It is totally possible to have test error both lower and higher than training RMSE.
+
+### Your turn to build models
+
+I'll give you some help building the first model. I'm doing things just like I did in the Rmd files/screencasts from the Modeling 1 session.
+
+### Fit a model
+
+Here's a simple model that just uses the `Total_Costs` variable as a predictor. Note that we are using the training data to fit our models. Later we will test the models predictive abilities on the test data.
+
+```{r lm1}
+
+charges_lm1 <- lm(Total_Charges ~ Total_Costs, data = ipd_train)
+summary(charges_lm1)
+
+```
+
+**QUESTION** How well does `charges_lm1` fit and what part of the regression output supports your conclusion? 
+
+> PUT YOUR ANSWER HERE : `charges_lm1` fits well than null model.In this model, p-Values is less than 0.05. , F values is greater than 1 and t value is also high which indicates `charges_lm1` fits well but Standard distance between the observations and the regression line is 3.9% of Total_Charges. value of standard error (3.9), which is large. Also the R-squared is 76.3% so, this model is not sufficiently precise. 
+
+
+**QUESTION** Does the sign of the coefficient value make sense to you?
+
+> PUT YOUR ANSWER HERE : Summary shows, the model explains around 76% of the variation of Total_charges. Std. Error is less than zero, The last row of results is the test for the hypothesis that all regression coefficients are zero. The p-value is 0.05 and F-statistic is 2.99. All coefficient value indicates Total_Costs can be predictor for Total_Charges.
+
+
+### Compute RMSE for the fitted model on training data
+
+Now let's compute the RMSE value for `charges_lm1` on the training data. As you've seen in the class notes, I tend to like to "gather up" my results in vectors so that I can quickly scan performance metrics across models. Right now we just have two models, so I'll just include those.
+
+```{r rmse_train_1}
+rmse_train <- c(RMSE(ipd_train$Total_Charges, charges_lm0$fitted.values),
+                RMSE(ipd_train$Total_Charges, charges_lm1$fitted.values)
+)
+
+rmse_train
+
+```
+**QUESTION** Does the RMSE comparison between `charges_lm0` and `charges_lm1` make sense? Why?
+ 
+> PUT YOUR ANSWER HERE :   RMSE value for `charges_lm1` is lower than `charges_lm0` which shows that "charges_lm1" model fit well compare to null model.
+
+### Use fitted model to make predictions on test data
+
+Now let's make predictions on the test data for `lm1`. See regression notes.
+
+```{r lm1_prediction}
+# predict_lm1 <- ???(charges_lm1, newdata = ???)
+
+predict_lm1 <- predict(charges_lm1,newdata = ipd_test)
+summary(predict_lm1)
+str(predict_lm1)
+```
+
+**QUESTION** Is `predict_lm1` a vector, a model object, or a dataframe?
+
+> PUT YOUR ANSWER HERE : Predict() stores value in a vector, so `predict_lm1` is a vactor.
+
+### Compute RMSE for the predictions on the test data
+
+Now we can compute the RMSE value for `lm1` on the test data. Again, I've included the null model results too.
+
+```{r rmse_test_1}
+rmse_test <- c(RMSE(ipd_test$Total_Charges, null_pred),
+                RMSE(ipd_test$Total_Charges, predict_lm1)
+)
+
+rmse_test
+```
+
+
+**QUESTION** Did the RMSE on the test data get worse for `lm1` when compared to RMSE on training data? Is this an expected outcome?
+
+> ANSWER: RMSE for test data is higher than training data. It gets little worse for `lm1`. It is expected to have more RMSE value for test data than training data.
+
+### More Model building
+
+Now, it's your turn to create the best linear regression model you can based on this dataset. You can do data transformations or recoding but you CANNOT add any new outside data. 
+
+Identify your top 3 models in terms of lowest RMSE values to use in the next part in which you'll use them to make predictions on the test dataset.
+
+### Model 1:
+
+Correlation matrix explain there is a positive relationship between [Total_Costs, Total_Charges and Length_of_Stay] variable, So trying to build multiple regression model using predictor Total_Costs and Length_of_Stay.
+
+```{r start_building_models - Model 1 (charges_lm2)}
+
+
+# calculate correlation between numerical predictor
+
+cor(ipd_train$Total_Costs, ipd_train$Total_Charges )
+cor(ipd_train$Length_of_Stay, ipd_train$Total_Charges )
+cor(ipd_train$Age, ipd_train$Total_Charges )
+
+charges_lm2 <- lm(Total_Charges ~ Total_Costs + Length_of_Stay  , data = ipd_train)
+
+summary(charges_lm2)
+
+#coef(charges_lm2)
+
+RMSE(ipd_train$Total_Charges, charges_lm2$fitted.values)
+
+
+```
+
+### Model 2:
+
+But the following histogram shows distribution of Total_Costs, Total_Charges and Length_of_Stay  is right-skewed so checking impact of log-transformation in 'charges_lm3'.
+
+```{r - log-transformation  - Model 2 (charges_lm3)}
+
+
+# Distribution of numerical variable 
+
+ggplot(ipd_train , aes(x=Total_Costs )) + geom_histogram()
+ggplot(ipd_train , aes(x=Total_Charges )) + geom_histogram()
+ggplot(ipd_train , aes(x=Length_of_Stay )) + geom_histogram()
+
+# Use Logarithmic transformation method to transform a skewed variable into a more normalized dataset.
+
+charges_lm3 <- lm(log(Total_Charges) ~ log(Total_Costs) + log(Length_of_Stay) , data = ipd_train)
+
+summary(charges_lm3)
+
+#coef(charges_lm3)
+
+RMSE(ipd_train$Total_Charges, charges_lm3$fitted.values)
+#round(summary(charges_lm3)$coef, 3)
+
+```
+
+### Model 3: 
+
+Box plot for 'Type_of_Admission', 'Patient_Disposition', 'Payment_Typology_1' and 'ED_Ind' shows all those variables do have outliers so not to include them in model.
+
+Create another model with categorical variable CCS_Dx_Desc_2, APR_DRG_Code_2 and CCS_Proc_Code_2 for which has less difference between mean and median for Total_Charges. 
+
+```{r  start_building_models - Model 3 (charges_lm4)}
+
+charges_lm4 <- lm(Total_Charges ~ Total_Costs + Length_of_Stay + CCS_Dx_Code_2 + APR_DRG_Code_2 + CCS_Proc_Code_2 , data = ipd_train)
+
+summary(charges_lm4)
+
+#round(summary(charges_lm4)$coef, 3)
+
+```
+
+In model 3, p- value for  CCS_Dx_Codec_2 and CCS_Proc_Code_2 is high. So improving model 3 by removing them. Also adding other categorical variable "Race", "APR_Risk_of_Mortality " and  "Health_Service_Area" as a predictor. 
+
+```{r Model 3(charges_lm4)}
+
+
+charges_lm4 <- lm(Total_Charges ~ Total_Costs + Length_of_Stay + APR_DRG_Code_2 + APR_Risk_of_Mortality   + Health_Service_Area + Race , data = ipd_train)
+
+summary(charges_lm4)
+
+RMSE(ipd_train$Total_Charges, charges_lm4$fitted.values)
+
+#coefplot(charges_lm4, predictors=c("Total_Costs","Length_of_Stay", "APR_DRG_Code_2",   APR_Risk_of_Mortality","Health_Service_Area", "Race"))
+
+```
+
+### Model diagnostics
+
+
+```{r}
+
+# R-squared value for all three model.  
+
+rsqrd <- c(summary(charges_lm2)$r.squared, summary(charges_lm3)$r.squared,
+           summary(charges_lm4)$r.squared)
+
+rsqrd
+
+coefplot(charges_lm2, predictors=c("Total_Costs","Length_of_Stay"))
+
+
+coefplot(charges_lm3, predictors=c("log(Total_Costs)","log(Length_of_Stay)"))
+
+
+qqnorm(resid(charges_lm3))
+
+
+RMSE(ipd_train$Total_Charges, charges_lm3$fitted.values)
+
+#But RMSE is high for charges_lm3 model.
+ 
+```
+
+
+#### Scatterplots of actual vs fitted values
+
+
+For your top 3 models, create a scatter plot showing actual vs fitted values
+of `Total_Charges`. It's convention to have the X-axis be the actuals and the Y-axis the fitted values. Remember, it's often nice to "gather up" your results
+into a data frame to facilitate plotting. See the notes on comparing competing
+regression models. 
+
+Scatterplot for Model 1:
+
+```{r}
+# Model 1 : 
+
+# applying fitted values to my data frame
+ipd_train$fitted<- charges_lm2$fitted.values
+
+# creating ggplot object for visualization
+lmodel_plot1_1 <- ggplot(ipd_train, aes(x= Total_Costs, y= Total_Charges, color = "skyblue")) +
+                geom_point(aes(y= fitted)) +geom_smooth(se = FALSE)
+
+print(lmodel_plot1_1)
+
+lmodel_plot1_2 <- ggplot(ipd_train, aes(x= Length_of_Stay, y= Total_Charges)) +
+                geom_point(aes(y= fitted)) + geom_smooth(se = FALSE)
+
+print(lmodel_plot1_2)
+
+```
+
+Scatterplot for Model 2:
+
+```{r}
+# Model 2 : 
+
+# applying fitted values to my data frame
+ipd_train$fitted<- charges_lm3$fitted.values
+
+# creating ggplot object for visualization
+lmodel_plot2_1 <- ggplot(ipd_train, aes(x= Total_Costs, y= Total_Charges )) +
+                geom_point(aes(y= fitted))  + scale_x_log10() +  scale_y_log10()
+
+print(lmodel_plot2_1)
+
+# creating ggplot object for visualization
+lmodel_plot2_2 <- ggplot(ipd_train, aes(x= Length_of_Stay, y= Total_Charges )) +
+                geom_point(aes(y= fitted))  + scale_x_log10() +  scale_y_log10()
+
+print(lmodel_plot2_2)
+
+
+```
+
+Scatterplot for Model 3:
+
+```{r}
+
+# Model 3 : 
+
+# applying fitted values to my data frame
+ipd_train$fitted<- charges_lm4$fitted.values
+
+# creating ggplot object for visualization
+lmodel_plot3 <- ggplot(ipd_train, aes(x= Race, y= Total_Charges)) +
+                geom_point(aes(y= fitted))
+
+print(lmodel_plot3)
+
+lmodel_plot4 <- ggplot(ipd_train, aes(x= APR_DRG_Code_2, y= Total_Charges)) +
+                geom_point(aes(y= fitted)) + coord_flip()
+
+print(lmodel_plot4)
+
+lmodel_plot5 <- ggplot(ipd_train, aes(x= APR_Risk_of_Mortality, y= Total_Charges)) +
+                geom_point(aes(y= fitted)) + coord_flip()
+
+print(lmodel_plot5)
+
+lmodel_plot6 <- ggplot(ipd_train, aes(x= Health_Service_Area, y= Total_Charges)) +
+                geom_point(aes(y= fitted)) + coord_flip()
+
+print(lmodel_plot6)
+
+```
+
+> COMMENT ON YOUR SCATTER PLOTS :
+> The scatter plot of Model 1 and Model 2 along with the smoothing line above suggests a linearly increasing relationship between the ‘Length_of_Stay’ and ‘Total_Costs’ variables while other model does not show posibility for linearity.
+
+
+#### Constant variance
+
+Make an appropriate plot to check for constant variance (homeskedasticity) for
+your top model. 
+Don't remember what kind of plot to make? See my notes on residual analysis
+or any intro stats book.
+
+```{r}
+
+
+h2 = ggplot(aes(x = .fitted, y= .resid), data = charges_lm4) + geom_point() + geom_hline(yintercept = 0) + 
+  geom_smooth(se = FALSE) +
+  labs(x = "Fitted values", y = "Residuals")
+
+# Print plot
+h2
+
+
+# Model 3
+residuals <- data.frame('Residuals' = charges_lm4$residuals)
+res_hist <- ggplot(residuals, aes(x=Residuals)) + geom_histogram(color='black', fill='skyblue') + ggtitle('Histogram of Residuals')
+
+res_hist
+
+```
+
+
+> DISCUSS YOUR INTERPRETATION OF THIS PLOT :
+> Looking at the above histogram we can say that graph is slightly right skewed and therefore can almost be considered as normally distributed.
+
+**HACKER EXTRA 2** We did a simple 80/20 train/test split. Instead, use k-fold cross validation with your training data to compare your models. What is the advantage of this over a simple split?
+
+> Answer: k-fold cross validation gives much more information about algorithm performance rather than using of simple split.
+
+```{r - HACKER EXTRA 2}
+library(boot)
+
+
+chargeG1 <- glm(Total_Charges ~ Total_Costs + Length_of_Stay , data = ipd_train, 
+               family = gaussian(link="identity"))
+
+
+chargeG2 <- glm(log(Total_Charges) ~ log(Total_Costs) + log(Length_of_Stay)  , data = ipd_train, 
+               family = gaussian(link="identity"))
+
+
+chargeG3 <- glm(Total_Charges ~ Total_Costs + Length_of_Stay + APR_DRG_Code_2 + APR_Risk_of_Mortality   + Health_Service_Area + Race  , data = ipd_train, 
+               family = gaussian(link="identity"))
+
+
+summary
+
+# Run the 5-fold cross validation
+
+chargeCV1 <- cv.glm(ipd_train, chargeG1, K=5)
+chargeCV2 <- cv.glm(ipd_train, chargeG2, K=5)
+chargeCV3 <- cv.glm(ipd_train, chargeG3, K=5)
+
+
+
+
+cvResults <- as.data.frame(rbind(chargeCV1$delta,
+                                 chargeCV2$delta,
+                                 chargeCV3$delta))
+
+names(cvResults) <- c("MSE", "MSE.Adjusted")
+cvResults$Model <- sprintf("chargeG%s", 1:3)
+cvResults
+```
+
+
+### Make predictions for the test dataset
+
+For each of your top 3 models, make predictions for `Total_Charges` using `ipd_test`.
+
+```{r}
+Predict1 <- predict(charges_lm2, newdata = ipd_test)
+
+Predict2 <- predict(charges_lm3, newdata = ipd_test)
+
+Predict3 <- predict(charges_lm4, newdata = ipd_test)
+
+summary(Predict1)
+summary(Predict2)
+summary(Predict3)
+
+save(ipd_train, ipd_test,
+     charges_lm2, charges_lm3, charges_lm4,
+     Predict1, Predict1, Predict1,
+     file="data/Predict123.rdata")
+
+```
+
+
+### Evaluate the predictions
+
+Compute the RMSE for each of the three models' predictions on the test data.
+
+Discuss your results. Address things like comparing RMSE on test vs train and overall how well your models fit and predicted.
+
+```{r}
+
+newrmse_test <- c(RMSE(ipd_test$Total_Charges, Predict1),
+                  RMSE(ipd_test$Total_Charges, Predict2),
+                  RMSE(ipd_test$Total_Charges, Predict3))
+
+newrmse_test
+
+newrmse_train <- c(RMSE(ipd_train$Total_Charges, charges_lm2$fitted.values),RMSE(ipd_train$Total_Charges, charges_lm3$fitted.values),RMSE(ipd_train$Total_Charges, charges_lm4$fitted.values))
+
+newrmse_train
+
+```
+
+
+> PUT YOUR DISCUSSION HERE : The RMSE for your training and your test sets looks very similar. And RMSE for test data is less than train data. but the model 3 (charges_lm4) has lowest RMSE in both data.
+
+### Your top model
+
+Show your top performing model and discuss whether the model appears to make
+sense in terms of the variables included. Why did you choose the variables you
+did?
+
+```{r - comparing competing regression models}
+
+#Top Model:
+
+
+charges_lm4 <- lm(Total_Charges ~ Total_Costs + Length_of_Stay + APR_DRG_Code_2 + APR_Risk_of_Mortality   + Health_Service_Area + Race , data = ipd_train)
+
+summary(charges_lm4)
+
+RMSE(ipd_train$Total_Charges, charges_lm4$fitted.values)
+
+```
+
+
+> PUT YOUR DISCUSSION HERE : For above model R-Squared value is 0.81 and The p-value is less than significant 0.05 and t-value is also high. Correlation matrix explain there is a positive relationship between [Total_Costs, Total_Charges and Length_of_Stay] variables, So Model-3 is top multilinear regression model with other predictor  APR_DRG_Code_2, 
+APR_Risk_of_Mortality, Health_Service_Area, Race, and also the RMSE is the lowest among all other three models.
+
+It will be interesting to compare the best models that everyone finds.
+
+Later we'll learn more techniques that will likely allow us to beat simple
+linear models.
+
+## Deliverables
+
+Just compress your entire project folder (zip or tar.gz) and upload the compressed file to Moodle.
+
